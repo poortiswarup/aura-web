@@ -7,7 +7,25 @@ const cors = require("cors");
 const { v4: uuidv4 } = require("uuid");
 const fs = require("fs");
 const path = require("path");
+const { Pool } = require("pg");
+const pgSession = require("connect-pg-simple")(session);
 
+const app = express();
+app.set("trust proxy", 1);
+const PORT = process.env.PORT || 3001;
+const CLIENT_URL = process.env.CLIENT_URL || "http://localhost:5173";
+
+const pool = new Pool({ connectionString: process.env.DATABASE_URL, ssl: { rejectUnauthorized: false } });
+
+// Create session table
+pool.query(`
+  CREATE TABLE IF NOT EXISTS session (
+    sid VARCHAR NOT NULL COLLATE "default",
+    sess JSON NOT NULL,
+    expire TIMESTAMP(6) NOT NULL,
+    CONSTRAINT session_pkey PRIMARY KEY (sid)
+  )
+`).catch(console.error);
 const app = express();
 app.set('trust proxy', 1);
 const PORT = process.env.PORT || 3001;
@@ -27,9 +45,8 @@ function writeJSON(file, data) {
 }
 
 // ── Middleware ────────────────────────────────────────────────────────────────
-app.use(cors({ origin: CLIENT_URL, credentials: true }));
-app.use(express.json());
 app.use(session({
+  store: new pgSession({ pool, createTableIfMissing: true }),
   secret: process.env.SESSION_SECRET || "aura-dev-secret",
   resave: false,
   saveUninitialized: false,
