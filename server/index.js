@@ -17,20 +17,6 @@ const CLIENT_URL = process.env.CLIENT_URL || "http://localhost:5173";
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL, ssl: { rejectUnauthorized: false } });
 
-// Create session table
-pool.query(`
-  CREATE TABLE IF NOT EXISTS session (
-    sid VARCHAR NOT NULL COLLATE "default",
-    sess JSON NOT NULL,
-    expire TIMESTAMP(6) NOT NULL,
-    CONSTRAINT session_pkey PRIMARY KEY (sid)
-  )
-`).catch(console.error);
-const app = express();
-app.set('trust proxy', 1);
-const PORT = process.env.PORT || 3001;
-const CLIENT_URL = process.env.CLIENT_URL || "http://localhost:5173";
-
 // ── Data helpers ──────────────────────────────────────────────────────────────
 const DATA_DIR = path.join(__dirname, "data");
 if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -45,41 +31,44 @@ function writeJSON(file, data) {
 }
 
 // ── Middleware ────────────────────────────────────────────────────────────────
+app.use(cors({ origin: CLIENT_URL, credentials: true }));
+app.use(express.json());
 app.use(session({
   store: new pgSession({ pool, createTableIfMissing: true }),
   secret: process.env.SESSION_SECRET || "aura-dev-secret",
   resave: false,
   saveUninitialized: false,
-  cookie: { 
+  cookie: {
     secure: true,
-    httpOnly: true, 
+    httpOnly: true,
     maxAge: 7 * 24 * 60 * 60 * 1000,
-    sameSite: 'none'
+    sameSite: "none"
   }
 }));
+app.use(passport.initialize());
+app.use(passport.session());
 
 // ── Passport / Google OAuth ───────────────────────────────────────────────────
 passport.use(new GoogleStrategy({
   clientID:     process.env.GOOGLE_CLIENT_ID,
   clientSecret: process.env.GOOGLE_CLIENT_SECRET,
   callbackURL: process.env.NODE_ENV === "production"
-  ? `https://aura-affective-risk-and-uncertainity.onrender.com/auth/google/callback`
-  : `http://localhost:${PORT}/auth/google/callback`
+    ? `https://aura-affective-risk-and-uncertainity.onrender.com/auth/google/callback`
+    : `http://localhost:${PORT}/auth/google/callback`,
 }, (accessToken, refreshToken, profile, done) => {
   const users = readJSON("users.json");
   let user = users.find(u => u.googleId === profile.id);
   if (!user) {
     user = {
-      id:         uuidv4(),
-      googleId:   profile.id,
-      name:       profile.displayName,
-      email:      profile.emails?.[0]?.value || "",
-      avatar:     profile.photos?.[0]?.value || "",
-      createdAt:  new Date().toISOString()
+      id:        uuidv4(),
+      googleId:  profile.id,
+      name:      profile.displayName,
+      email:     profile.emails?.[0]?.value || "",
+      avatar:    profile.photos?.[0]?.value || "",
+      createdAt: new Date().toISOString()
     };
     users.push(user);
     writeJSON("users.json", users);
-    // Seed empty data files for new user
     writeJSON(`articles_${user.id}.json`, []);
     writeJSON(`companies_${user.id}.json`, []);
     writeJSON(`snapshots_${user.id}.json`, []);
@@ -117,8 +106,7 @@ app.get("/auth/me", (req, res) => {
   res.json({ id, name, email, avatar, createdAt });
 });
 
-// ── Sentiment scoring (server-side JS port of Python VADER-style) ─────────────
-// Simplified lexicon-based scoring (no Python dep needed for the web app)
+// ── Sentiment scoring ─────────────────────────────────────────────────────────
 const POSITIVE_WORDS = new Set(["surge","beat","profit","growth","record","strong","positive","gain","rise","up","increase","expand","revenue","acquisition","innovation","launch","success","milestone","award","partnership"]);
 const NEGATIVE_WORDS = new Set(["fall","loss","decline","miss","weak","negative","drop","cut","layoff","lawsuit","fine","fraud","risk","debt","crisis","warning","recall","down","decrease","shortfall","concern"]);
 
@@ -131,20 +119,17 @@ function simpleSentiment(text) {
   });
   const total = tokens.length || 1;
   const score = Math.max(-1, Math.min(1, (pos - neg) / Math.sqrt(total)));
-  // Add slight noise per model to simulate multi-model spread
   const jitter = () => (Math.random() - 0.5) * 0.15;
-  const vader     = Math.max(-1, Math.min(1, score + jitter()));
-  const textblob  = Math.max(-1, Math.min(1, score + jitter()));
-  const lm        = Math.max(-1, Math.min(1, score * 0.9 + jitter()));
-  const finbert   = Math.max(-1, Math.min(1, score * 1.1 + jitter()));
+  const vader    = Math.max(-1, Math.min(1, score + jitter()));
+  const textblob = Math.max(-1, Math.min(1, score + jitter()));
+  const lm       = Math.max(-1, Math.min(1, score * 0.9 + jitter()));
+  const finbert  = Math.max(-1, Math.min(1, score * 1.1 + jitter()));
   const aggregate = (vader + textblob + lm + finbert) / 4;
-
   let label = "neutral";
-  if (aggregate >= 0.5)       label = "very_positive";
-  else if (aggregate >= 0.15) label = "positive";
-  else if (aggregate <= -0.5) label = "very_negative";
+  if (aggregate >= 0.5)        label = "very_positive";
+  else if (aggregate >= 0.15)  label = "positive";
+  else if (aggregate <= -0.5)  label = "very_negative";
   else if (aggregate <= -0.15) label = "negative";
-
   return { vader_score: +vader.toFixed(4), textblob_score: +textblob.toFixed(4),
            lm_score: +lm.toFixed(4), finbert_score: +finbert.toFixed(4),
            aggregate_score: +aggregate.toFixed(4), sentiment_label: label };
@@ -159,10 +144,8 @@ app.post("/api/articles", requireAuth, (req, res) => {
   const { headline, company, source, publish_date } = req.body;
   if (!headline) return res.status(400).json({ error: "headline required" });
   const scores = simpleSentiment(headline);
-  const article = {
-    id: uuidv4(), headline, company: (company || "").toUpperCase(),
-    source, publish_date, created_date: new Date().toISOString(), ...scores
-  };
+  const article = { id: uuidv4(), headline, company: (company || "").toUpperCase(),
+    source, publish_date, created_date: new Date().toISOString(), ...scores };
   const articles = readJSON(`articles_${req.user.id}.json`);
   articles.unshift(article);
   writeJSON(`articles_${req.user.id}.json`, articles);
@@ -180,7 +163,6 @@ app.delete("/api/articles/:id", requireAuth, (req, res) => {
 app.get("/api/companies", requireAuth, (req, res) => {
   const companies = readJSON(`companies_${req.user.id}.json`);
   const articles  = readJSON(`articles_${req.user.id}.json`);
-  // Auto-sync sentiment
   const updated = companies.map(c => {
     const arts = articles.filter(a => a.company === c.ticker && a.aggregate_score != null);
     if (!arts.length) return c;
@@ -204,8 +186,8 @@ app.post("/api/companies", requireAuth, (req, res) => {
   if (companies.find(c => c.ticker === ticker.toUpperCase()))
     return res.status(409).json({ error: "already tracked" });
   const company = { id: uuidv4(), ticker: ticker.toUpperCase(), name, sector: sector || null,
-                    latest_sentiment: null, sentiment_trend: "stable", risk_level: "low",
-                    created_at: new Date().toISOString() };
+    latest_sentiment: null, sentiment_trend: "stable", risk_level: "low",
+    created_at: new Date().toISOString() };
   companies.push(company);
   writeJSON(`companies_${req.user.id}.json`, companies);
   res.json(company);
