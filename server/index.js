@@ -41,7 +41,9 @@ app.use(passport.session());
 passport.use(new GoogleStrategy({
   clientID:     process.env.GOOGLE_CLIENT_ID,
   clientSecret: process.env.GOOGLE_CLIENT_SECRET,
-  callbackURL:  `http://localhost:${PORT}/auth/google/callback`,
+  callbackURL: process.env.NODE_ENV === "production"
+  ? `https://aura-affective-risk-and-uncertainity.onrender.com/auth/google/callback`
+  : `http://localhost:${PORT}/auth/google/callback`
 }, (accessToken, refreshToken, profile, done) => {
   const users = readJSON("users.json");
   let user = users.find(u => u.googleId === profile.id);
