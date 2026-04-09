@@ -32,10 +32,13 @@ app.use(session({
   secret: process.env.SESSION_SECRET || "aura-dev-secret",
   resave: false,
   saveUninitialized: false,
-  cookie: { secure: process.env.NODE_ENV === "production", httpOnly: true, maxAge: 7 * 24 * 60 * 60 * 1000 }
+  cookie: { 
+    secure: true,
+    httpOnly: true, 
+    maxAge: 7 * 24 * 60 * 60 * 1000,
+    sameSite: 'none'
+  }
 }));
-app.use(passport.initialize());
-app.use(passport.session());
 
 // ── Passport / Google OAuth ───────────────────────────────────────────────────
 passport.use(new GoogleStrategy({
