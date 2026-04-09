@@ -15,7 +15,10 @@ app.set("trust proxy", 1);
 const PORT = process.env.PORT || 3001;
 const CLIENT_URL = process.env.CLIENT_URL || "http://localhost:5173";
 
-const pool = new Pool({ connectionString: process.env.DATABASE_URL, ssl: { rejectUnauthorized: false } });
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: process.env.DATABASE_URL ? { rejectUnauthorized: false } : false
+});
 
 // ── Data helpers ──────────────────────────────────────────────────────────────
 const DATA_DIR = path.join(__dirname, "data");
@@ -34,7 +37,9 @@ function writeJSON(file, data) {
 app.use(cors({ origin: CLIENT_URL, credentials: true }));
 app.use(express.json());
 app.use(session({
-  store: new pgSession({ pool, createTableIfMissing: true }),
+  store: process.env.DATABASE_URL
+  ? new pgSession({ pool, createTableIfMissing: true })
+  : undefined,
   secret: process.env.SESSION_SECRET || "aura-dev-secret",
   resave: false,
   saveUninitialized: false,
