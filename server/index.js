@@ -1,4 +1,5 @@
 require("dotenv").config();
+
 const express = require("express");
 const session = require("express-session");
 const passport = require("passport");
@@ -7,8 +8,6 @@ const cors = require("cors");
 const { v4: uuidv4 } = require("uuid");
 const fs = require("fs");
 const path = require("path");
-const { Pool } = require("pg");
-const pgSession = require("connect-pg-simple")(session);
 
 const app = express();
 app.set("trust proxy", 1);
@@ -16,18 +15,7 @@ app.set("trust proxy", 1);
 const PORT = process.env.PORT || 10000;
 const CLIENT_URL = process.env.CLIENT_URL || "http://localhost:5173";
 
-// ✅ PostgreSQL connection (SAFE)
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false },
-});
-
-// ✅ Prevent crash if DB fails
-pool.connect()
-  .then(() => console.log("✅ DB Connected"))
-  .catch(err => console.error("❌ DB Connection Error:", err));
-
-// ── Data helpers ─────────────────────────────────────────
+// ── Data helpers (local JSON storage) ─────────────────────
 const DATA_DIR = path.join(__dirname, "data");
 if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
 
@@ -45,7 +33,7 @@ function writeJSON(file, data) {
   fs.writeFileSync(path.join(DATA_DIR, file), JSON.stringify(data, null, 2));
 }
 
-// ── Middleware ───────────────────────────────────────────
+// ── Middleware ────────────────────────────────────────────
 app.use(cors({
   origin: CLIENT_URL,
   credentials: true
@@ -53,29 +41,20 @@ app.use(cors({
 
 app.use(express.json());
 
-// ✅ SAFE session config (FIXED)
+// ✅ SIMPLE SESSION (NO POSTGRES)
 app.use(session({
-  store: process.env.NODE_ENV === "production"
-    ? new pgSession({ pool, createTableIfMissing: true })
-    : undefined,
-  secret: process.env.SESSION_SECRET || "dev-secret",
+  secret: "simple-secret",
   resave: false,
-  saveUninitialized: false,
-  cookie: {
-    secure: process.env.NODE_ENV === "production",
-    httpOnly: true,
-    sameSite: process.env.NODE_ENV === "production" ? "none" : "lax",
-    maxAge: 7 * 24 * 60 * 60 * 1000
-  }
+  saveUninitialized: false
 }));
 
 app.use(passport.initialize());
 app.use(passport.session());
 
-// ── Passport ─────────────────────────────────────────────
+// ── Passport (Google Auth) ────────────────────────────────
 passport.use(new GoogleStrategy({
-  clientID: process.env.GOOGLE_CLIENT_ID,
-  clientSecret: process.env.GOOGLE_CLIENT_SECRET,
+  clientID: process.env.GOOGLE_CLIENT_ID || "dummy",
+  clientSecret: process.env.GOOGLE_CLIENT_SECRET || "dummy",
   callbackURL: process.env.NODE_ENV === "production"
     ? "https://aura-affective-risk-and-uncertainity.onrender.com/auth/google/callback"
     : `http://localhost:${PORT}/auth/google/callback`
@@ -110,13 +89,13 @@ passport.deserializeUser((id, done) => {
   done(null, users.find(u => u.id === id) || null);
 });
 
-// ── Auth middleware ──────────────────────────────────────
+// ── Auth middleware ───────────────────────────────────────
 function requireAuth(req, res, next) {
   if (req.isAuthenticated()) return next();
   res.status(401).json({ error: "Unauthorized" });
 }
 
-// ── Routes ───────────────────────────────────────────────
+// ── Routes ────────────────────────────────────────────────
 app.get("/", (req, res) => {
   res.send("✅ AURA backend running");
 });
@@ -142,20 +121,55 @@ app.get("/auth/me", (req, res) => {
   res.json(req.user);
 });
 
-// ── Simple test DB route ─────────────────────────────────
-app.get("/db", async (req, res) => {
-  try {
-    const result = await pool.query("SELECT NOW()");
-    res.json(result.rows);
-  } catch (err) {
-    console.error(err);
-    res.status(500).send("DB ERROR");
-  }
+// ── Sentiment logic ───────────────────────────────────────
+const POSITIVE_WORDS = new Set(["surge","profit","growth","strong","positive","gain","rise"]);
+const NEGATIVE_WORDS = new Set(["fall","loss","decline","weak","negative","drop","risk"]);
+
+function simpleSentiment(text) {
+  const tokens = text.toLowerCase().split(/\s+/);
+  let pos = 0, neg = 0;
+
+  tokens.forEach(t => {
+    if (POSITIVE_WORDS.has(t)) pos++;
+    if (NEGATIVE_WORDS.has(t)) neg++;
+  });
+
+  const score = (pos - neg) / (tokens.length || 1);
+
+  return {
+    aggregate_score: score,
+    sentiment_label: score > 0 ? "positive" : score < 0 ? "negative" : "neutral"
+  };
+}
+
+// ── Articles API ──────────────────────────────────────────
+app.get("/api/articles", requireAuth, (req, res) => {
+  res.json(readJSON(`articles_${req.user.id}.json`));
 });
 
-// ── Serve frontend ───────────────────────────────────────
+app.post("/api/articles", requireAuth, (req, res) => {
+  const { headline } = req.body;
+
+  const scores = simpleSentiment(headline);
+
+  const article = {
+    id: uuidv4(),
+    headline,
+    created_date: new Date().toISOString(),
+    ...scores
+  };
+
+  const articles = readJSON(`articles_${req.user.id}.json`);
+  articles.unshift(article);
+  writeJSON(`articles_${req.user.id}.json`, articles);
+
+  res.json(article);
+});
+
+// ── Serve frontend ────────────────────────────────────────
 if (process.env.NODE_ENV === "production") {
   const distPath = path.join(__dirname, "../client/dist");
+
   if (fs.existsSync(distPath)) {
     app.use(express.static(distPath));
     app.get("*", (req, res) => {
@@ -164,7 +178,7 @@ if (process.env.NODE_ENV === "production") {
   }
 }
 
-// ── Start server ─────────────────────────────────────────
+// ── Start server ──────────────────────────────────────────
 app.listen(PORT, () => {
-  console.log(`🚀 Server running on port ${PORT}`);
+  console.log(` Server running on port ${PORT}`);
 });
